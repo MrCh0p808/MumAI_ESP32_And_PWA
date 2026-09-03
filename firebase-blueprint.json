@@ -1,0 +1,38 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user roles and profile data",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["dependent", "caregiver"] },
+        "name": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "maxLength": 150 },
+        "createdAt": { "type": "object" }
+      },
+      "required": ["role", "name", "email"]
+    },
+    "Memory": {
+      "title": "Episodic Memory",
+      "description": "Stores memories and logs for a dependent",
+      "type": "object",
+      "properties": {
+        "dependentId": { "type": "string", "maxLength": 128 },
+        "content": { "type": "string", "maxLength": 1000 },
+        "category": { "type": "string", "enum": ["medical", "routine", "alert", "preference"] },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["dependentId", "content", "category", "timestamp"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles"
+    },
+    "memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/Memory" },
+      "description": "Episodic memories"
+    }
+  }
+}

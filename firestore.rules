@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['role', 'name', 'email'])
+        && data.role is string && data.role in ['dependent', 'caregiver']
+        && data.name is string && data.name.size() <= 100
+        && data.email is string && data.email.size() <= 150;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isSignedIn(); // Caregivers need to read dependent info, etc.
+      allow list: if isSignedIn();
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) 
+                     && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'email']);
+    }
+
+    function isValidMemory(data) {
+      return data.keys().hasAll(['dependentId', 'content', 'category', 'timestamp'])
+        && data.dependentId is string && data.dependentId.size() <= 128
+        && data.content is string && data.content.size() <= 1000
+        && data.category is string && data.category in ['medical', 'routine', 'alert', 'preference']
+        && data.timestamp is number;
+    }
+
+    match /memories/{memoryId} {
+      allow get, list: if isSignedIn(); // Both dependent and caregiver can read
+      allow create: if isSignedIn() && isValidMemory(incoming())
+                     && exists(/databases/$(database)/documents/users/$(incoming().dependentId));
+      allow update: if false; // Logs are immutable
+      allow delete: if false;
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Mum AI Companion",
+  "description": "Persistent, context-aware AI agent and physical presence companion for elder care.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
