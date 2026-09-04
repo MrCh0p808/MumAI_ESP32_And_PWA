@@ -255,11 +255,38 @@ async function startServer() {
   app.post('/api/agora/webhook', async (req, res) => {
     try {
       const authHeader = req.headers['authorization'];
+      const agoraSignature = req.headers['agora-signature'] || req.headers['Agora-Signature'];
       const expectedSecret = process.env.AGORA_WEBHOOK_SECRET;
 
-      // Security Sentinel: Ensure request is authorized
-      if (expectedSecret && authHeader !== `Bearer ${expectedSecret}`) {
-        console.warn('[Security] Unauthorized webhook attempt');
+      let isAuthorized = false;
+
+      // Security Sentinel: Dual-Mode Authorization
+      if (!expectedSecret) {
+        // If no secret is configured, allow for local testing, but warn.
+        console.warn('[Security] No AGORA_WEBHOOK_SECRET set! Webhook is unauthenticated.');
+        isAuthorized = true;
+      } else {
+        // 1. Check Bearer Token (for Custom Tool UI calls)
+        if (authHeader === `Bearer ${expectedSecret}`) {
+          isAuthorized = true;
+        } 
+        // 2. Check Agora Signature (for Global Webhook UI events)
+        else if (agoraSignature) {
+          const rawBody = (req as any).rawBody;
+          if (rawBody) {
+            // Agora uses HMAC SHA1 or SHA256 with the signing secret
+            const hmac = crypto.createHmac('sha1', expectedSecret).update(rawBody).digest('hex');
+            const hmac256 = crypto.createHmac('sha256', expectedSecret).update(rawBody).digest('hex');
+            
+            if (hmac === agoraSignature || hmac256 === agoraSignature) {
+              isAuthorized = true;
+            }
+          }
+        }
+      }
+
+      if (!isAuthorized) {
+        console.warn('[Security] Unauthorized webhook attempt. Check your AGORA_WEBHOOK_SECRET.');
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
