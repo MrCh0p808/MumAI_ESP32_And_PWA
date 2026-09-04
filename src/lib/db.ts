@@ -1,5 +1,5 @@
 import { doc, getDoc, setDoc, serverTimestamp, collection, addDoc, query, where, orderBy, onSnapshot } from 'firebase/firestore';
-import { db, auth } from './firebase';
+import { db, auth } from './firebase-config';
 import { MemoryRecord } from '../types';
 
 export type UserRole = 'dependent' | 'caregiver' | null;

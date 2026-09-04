@@ -1,5 +1,5 @@
 import { collection, addDoc, serverTimestamp, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
-import { db, auth } from '../lib/firebase';
+import { db, auth } from '../lib/firebase-config';
 
 export interface TurnMetricEvent {
   turnId: string;

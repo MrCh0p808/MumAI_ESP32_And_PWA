@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { LogIn, LogOut, User as UserIcon } from 'lucide-react';
-import { auth, signInWithGoogle, logout } from './lib/firebase';
+import { auth, signInWithGoogle, logout } from './lib/firebase-config';
 import { getUserRole, createUserProfile, UserRole } from './lib/db';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { DependentView } from './views/DependentView';
