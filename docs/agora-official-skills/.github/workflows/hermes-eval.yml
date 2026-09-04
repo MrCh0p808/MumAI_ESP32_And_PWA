@@ -1,0 +1,326 @@
+name: Skills Evaluation (Hermes Agent)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite_ids:
+        description: "Comma-separated suite IDs, or 'all' for all suites"
+        required: false
+        default: "workflow"
+      case_id:
+        description: "Single case ID (leave empty for full suite)"
+        required: false
+        default: "convoai-e2e-first-success"
+      hermes_model:
+        description: "Hermes model (e.g. gpt-5.4)"
+        required: false
+        default: ""
+      eval_ref:
+        description: "agentic-evals ref (branch/tag/SHA; default pinned in .github/eval-pin.env)"
+        required: false
+        default: ""
+
+  pull_request:
+    paths:
+      - "skills/**/*.md"
+      - ".github/workflows/**"
+
+env:
+  TARGET_ID: agora
+
+jobs:
+  evaluate:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout skills repo
+        uses: actions/checkout@v5
+        with:
+          # PR: test the pushed branch head; dispatch: use the triggering ref
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: skills-repo
+
+      - name: Setup eval harness
+        id: setup
+        uses: ./skills-repo/.github/actions/setup-eval-harness
+        with:
+          eval_repo: AgoraIO/agentic-evals
+          eval_ref: ${{ github.event.inputs.eval_ref || '' }}
+
+      - name: Validate YAML
+        working-directory: agentic-evals
+        run: |
+          ruby -e '
+            require "yaml"
+            tid = "agora"
+            Dir["targets/#{tid}/cases/*/suite.yaml"].sort.each { |f| YAML.load_file(f) }
+            Dir["targets/#{tid}/cases/**/*.yaml"].sort.reject { |f| f.end_with?("suite.yaml") }.each { |f| YAML.load_file(f) }
+            YAML.load_file("targets/#{tid}/target.yaml")
+            puts "yaml-ok"
+          '
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@latest --activate
+
+      - name: Install runtime dependencies
+        run: |
+          pip install pyyaml
+          npm install -g --allow-scripts=agent-browser agent-browser @openai/codex
+          agent-browser install
+          agent-browser --version
+          agent-browser --session hermes-preflight open about:blank
+          agent-browser --session hermes-preflight close
+
+      - name: Install Hermes Agent
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
+          source ~/.bashrc || source ~/.zshrc || true
+          export PATH="$HOME/.local/bin:$PATH"
+          hermes --version
+
+      - name: Configure Hermes
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESPONSES_API_ENDPOINT: ${{ secrets.RESPONSES_API_ENDPOINT }}
+          HERMES_MODEL: ${{ github.event.inputs.hermes_model || '' }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY is not set"
+            exit 1
+          fi
+          if [ -z "$RESPONSES_API_ENDPOINT" ]; then
+            echo "::error::RESPONSES_API_ENDPOINT is not set"
+            exit 1
+          fi
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p ~/.hermes
+
+          # Derive base URL from RESPONSES_API_ENDPOINT (strip /v1/responses suffix)
+          BASE_URL="${RESPONSES_API_ENDPOINT%/v1/responses}"
+          BASE_URL="${BASE_URL%/}/v1"
+
+          # Determine model
+          MODEL="${HERMES_MODEL:-gpt-5.4}"
+
+          # Use a named custom provider so Hermes sends the API key to the
+          # non-OpenAI endpoint and uses the Responses API transport.
+          hermes config set providers.test-endpoint.name test-endpoint
+          hermes config set providers.test-endpoint.base_url "${BASE_URL}"
+          hermes config set providers.test-endpoint.key_env OPENAI_API_KEY
+          hermes config set providers.test-endpoint.transport codex_responses
+          hermes config set providers.test-endpoint.default_model "${MODEL}"
+          hermes config set model.provider custom:test-endpoint
+          hermes config set model.default "${MODEL}"
+          hermes config set agent.max_turns 90
+          hermes config set tools.profile coding
+          hermes config set terminal.backend local
+
+          # Write .env for API key
+          echo "OPENAI_API_KEY=${OPENAI_API_KEY}" > ~/.hermes/.env
+
+          echo "Hermes configured: provider=custom:test-endpoint, base_url=${BASE_URL}, model=${MODEL}"
+
+      - name: Hermes auth smoke test
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -e
+          smoke_passed=0
+          for attempt in 1 2 3; do
+            if hermes run --max-turns 1 "Reply OK" >/tmp/hermes-smoke.log 2>&1; then
+              echo "Hermes smoke test passed via hermes run."
+              smoke_passed=1
+              break
+            elif hermes chat --yolo --quiet -q "Reply OK" >/tmp/hermes-smoke.log 2>&1; then
+              echo "Hermes smoke test passed via hermes chat."
+              smoke_passed=1
+              break
+            fi
+
+            if grep -q "INVALID_API_KEY" /tmp/hermes-smoke.log; then
+              echo "::error::Hermes returned INVALID_API_KEY during smoke test."
+              cat /tmp/hermes-smoke.log
+              exit 1
+            fi
+            if ! grep -q "HTTP 503" /tmp/hermes-smoke.log; then
+              echo "::error::Hermes auth smoke test failed. Confirm RESPONSES_API_ENDPOINT and OPENAI_API_KEY are valid."
+              cat /tmp/hermes-smoke.log
+              exit 1
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::Hermes provider returned HTTP 503; retrying smoke test (${attempt}/3)."
+              sleep 15
+            fi
+          done
+
+          if [ "$smoke_passed" -ne 1 ]; then
+            echo "::error::Hermes provider remained unavailable after 3 smoke-test attempts."
+            cat /tmp/hermes-smoke.log
+            exit 1
+          fi
+
+      - name: Write credentials file
+        env:
+          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
+          AGORA_APP_CERTIFICATE: ${{ secrets.AGORA_APP_CERTIFICATE }}
+        run: |
+          printf 'export AGORA_APP_ID="%s"\nexport AGORA_APP_CERTIFICATE="%s"\n' \
+            "$AGORA_APP_ID" "$AGORA_APP_CERTIFICATE" > /tmp/agora-credentials.env
+          chmod 600 /tmp/agora-credentials.env
+
+      - name: Resolve cases
+        id: resolve
+        working-directory: agentic-evals
+        env:
+          SUITE_IDS: ${{ github.event.inputs.suite_ids || 'workflow' }}
+          CASE_ID: ${{ github.event.inputs.case_id || 'convoai-e2e-first-success' }}
+        run: |
+          python3 - << 'PY'
+          import yaml, json, os, datetime
+          target_id = os.environ["TARGET_ID"]
+          suite_ids = os.environ.get("SUITE_IDS", "workflow")
+          case_id = os.environ.get("CASE_ID", "convoai-e2e-first-success")
+          target = yaml.safe_load(open(f"targets/{target_id}/target.yaml"))
+          if suite_ids == "all":
+              suite_ids = target["default_suites"]
+          else:
+              suite_ids = [s.strip() for s in suite_ids.split(",")]
+          cases = []
+          for sid in suite_ids:
+              suite = yaml.safe_load(open(f"targets/{target_id}/cases/{sid}/suite.yaml"))
+              for cp in suite["cases"]:
+                  c = yaml.safe_load(open(cp))
+                  if case_id and c["case_id"] != case_id:
+                      continue
+                  cases.append({"case_id": c["case_id"], "path": cp, "user_prompt": c["input"]["user_prompt"]})
+          now = datetime.datetime.now(datetime.timezone.utc)
+          run_id = f"hermes-{now.strftime('%Y%m%dT%H%M%SZ')}"
+          run_dir = f"runs/{run_id}"
+          os.makedirs(f"{run_dir}/case-artifacts", exist_ok=True)
+          os.makedirs(f"{run_dir}/case-results", exist_ok=True)
+          manifest = {"run_mode": "single-run", "run_id": run_id, "runtime": "hermes-agent",
+                      "target_id": target_id, "suite_ids": suite_ids,
+                      "case_ids": [c["case_id"] for c in cases],
+                      "started_at": now.isoformat(), "evidence_mode": "hermes-two-phase"}
+          json.dump(manifest, open(f"{run_dir}/manifest.json", "w"), indent=2)
+          json.dump(cases, open("/tmp/hermes-eval-cases.json", "w"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"run_dir={run_dir}\n")
+          print(f"Resolved {len(cases)} cases -> {run_dir}")
+          PY
+
+      - name: Run two-phase evaluation
+        working-directory: agentic-evals
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESPONSES_API_ENDPOINT: ${{ secrets.RESPONSES_API_ENDPOINT }}
+          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
+          AGORA_APP_CERTIFICATE: ${{ secrets.AGORA_APP_CERTIFICATE }}
+          RUN_DIR: ${{ steps.resolve.outputs.run_dir }}
+          HERMES_MODEL: ${{ github.event.inputs.hermes_model || '' }}
+          AGENT_BROWSER_DEBUG: "1"
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source /tmp/agora-credentials.env
+          python3 scripts/run_hermes_eval.py
+
+      - name: Generate report
+        if: always() && steps.resolve.outputs.run_dir != ''
+        working-directory: agentic-evals
+        env:
+          RUN_DIR: ${{ steps.resolve.outputs.run_dir }}
+        run: python3 scripts/generate_report.py
+
+      - name: Upload run artifacts
+        if: always() && steps.resolve.outputs.run_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-hermes-${{ env.TARGET_ID }}-${{ github.run_id }}
+          path: agentic-evals/${{ steps.resolve.outputs.run_dir }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Post report to job summary
+        if: always() && steps.resolve.outputs.run_dir != ''
+        env:
+          RUN_DIR: agentic-evals/${{ steps.resolve.outputs.run_dir }}
+        run: |
+          if [ -f "${RUN_DIR}/report.md" ]; then
+            echo "## Skill Eval Report (Hermes Agent)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat "${RUN_DIR}/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post report as PR comment
+        if: github.event_name == 'pull_request' && always() && steps.resolve.outputs.run_dir != ''
+        uses: actions/github-script@v7
+        env:
+          RUN_DIR: agentic-evals/${{ steps.resolve.outputs.run_dir }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const rp = `${process.env.RUN_DIR}/report.md`;
+            if (!fs.existsSync(rp)) return;
+            const report = fs.readFileSync(rp, 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## Skill Eval Report (Hermes Agent)\n\n${report}\n\n---\n[Download artifacts](${process.env.RUN_URL})`,
+            });
+
+      - name: Report results
+        if: always() && steps.resolve.outputs.run_dir != ''
+        env:
+          RUN_DIR: agentic-evals/${{ steps.resolve.outputs.run_dir }}
+        run: |
+          RESULTS_DIR="${RUN_DIR}/case-results"
+          [ -d "$RESULTS_DIR" ] || { echo "::warning::No case-results"; exit 0; }
+          COUNTS=$(python3 -c '
+          import json
+          import sys
+          from pathlib import Path
+
+          counts = {"pass": 0, "fail": 0, "blocked": 0}
+          for path in Path(sys.argv[1]).glob("*.json"):
+              try:
+                  status = json.loads(path.read_text()).get("status")
+              except (OSError, json.JSONDecodeError):
+                  status = "blocked"
+              counts[status if status in counts else "blocked"] += 1
+          print(counts["pass"], counts["fail"], counts["blocked"])
+          ' "$RESULTS_DIR")
+          read -r PASS FAIL BLOCKED <<< "$COUNTS"
+          echo "Results: ${PASS} pass, ${FAIL} fail, ${BLOCKED} blocked"
+          if [ "$FAIL" -gt 0 ] || [ "$BLOCKED" -gt 0 ]; then
+            echo "::error::${FAIL} fail, ${BLOCKED} blocked - see report for details"
+            exit 1
+          fi
+
+      - name: Notify Feishu
+        if: always() && github.event_name != 'pull_request' && steps.resolve.outputs.run_dir != ''
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          RUN_DIR: agentic-evals/${{ steps.resolve.outputs.run_dir }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: python3 agentic-evals/scripts/notify_feishu.py || true

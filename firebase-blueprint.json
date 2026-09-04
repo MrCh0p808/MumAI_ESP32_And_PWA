@@ -23,6 +23,23 @@
         "timestamp": { "type": "number" }
       },
       "required": ["dependentId", "content", "category", "timestamp"]
+    },
+    "Telemetry": {
+      "title": "Telemetry Summary",
+      "description": "Aggregated session latency and health metrics",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "channelName": { "type": "string", "maxLength": 128 },
+        "turnsCount": { "type": "number" },
+        "avgLatencyMs": { "type": "number" },
+        "maxLatencyMs": { "type": "number" },
+        "bargeInCount": { "type": "number" },
+        "voiceprintMatchPct": { "type": "number" },
+        "startedAt": { "type": "number" },
+        "endedAt": { "type": "number" },
+        "createdAt": { "type": "object" }
+      }
     }
   },
   "firestore": {
@@ -33,6 +50,10 @@
     "memories/{memoryId}": {
       "schema": { "$ref": "#/entities/Memory" },
       "description": "Episodic memories"
+    },
+    "telemetry/{telemetryId}": {
+      "schema": { "$ref": "#/entities/Telemetry" },
+      "description": "Session telemetry and latency metrics"
     }
   }
 }

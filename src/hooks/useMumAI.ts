@@ -1,14 +1,18 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import AgoraRTC, { IAgoraRTCClient, IMicrophoneAudioTrack } from 'agora-rtc-sdk-ng';
-import AgoraRTM from 'agora-rtm-sdk';
+import { agoraRtm, CHANNEL_NAME } from '../lib/agoraRtm';
 import { AgentState, TelemetryMetrics, MemoryRecord, TranscriptMessage } from '../types';
 import { UserRole, logMemory, subscribeToMemories } from '../lib/db';
-import { auth } from '../lib/firebase';
+import { telemetryService } from '../services/telemetryService';
+import { agentService } from '../services/agentService';
 
-const APP_ID = import.meta.env.VITE_AGORA_APP_ID || '';
-const CHANNEL_NAME = 'mummy-dev';
+const APP_ID = import.meta.env.VITE_AGORA_APP_ID || 'd6289000c1bc4e0d9247e44a3b33c138';
 
-export function useMumAI(userRole: UserRole = 'dependent', userId: string | null = null) {
+export function useMumAI(
+  userRole: UserRole = 'dependent', 
+  userId: string | null = null,
+  voiceprintUrl: string | null = null
+) {
   const [state, setState] = useState<AgentState>('idle');
   const [volume, setVolume] = useState<number>(0);
   const [metrics, setMetrics] = useState<TelemetryMetrics>({
@@ -23,10 +27,8 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
 
   const rtcClient = useRef<IAgoraRTCClient | null>(null);
   const localAudioTrack = useRef<IMicrophoneAudioTrack | null>(null);
-  
-  const rtmClient = useRef<any>(null);
-  const rtmChannel = useRef<any>(null);
   const isDependent = userRole === 'dependent';
+  const turnStartTimeRef = useRef<number>(0);
 
   useEffect(() => {
     let unsubscribeMemories: (() => void) | undefined;
@@ -39,50 +41,51 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
       });
     }
 
-    // If caregiver, we auto-connect to RTM to monitor
+    // Subscribe to incoming RTM events via Singleton listener
+    const removeRtmListener = agoraRtm.addMessageListener((type, data) => {
+      if (type === 'transcript') {
+        const text = data.message?.text || data.text;
+        const rawRole = data.message?.role || data.role;
+        const role = rawRole === 'assistant' ? 'agent' : (rawRole || 'agent');
+        if (text) {
+          const newMsg: TranscriptMessage = {
+            id: data.message?.id || data.turn_id?.toString() || Date.now().toString(),
+            role,
+            text,
+            timestamp: new Date()
+          };
+          setTranscript(prev => {
+            const last = prev[prev.length - 1];
+            if (last && last.text === text && last.role === role) return prev;
+            return [...prev, newMsg];
+          });
+          agentService.submitTurnTranscript(CHANNEL_NAME, text, role);
+        }
+      } else if (type === 'state') {
+        if (data.state) {
+          setState(data.state);
+        }
+      } else if (type === 'metrics') {
+        if (data.metrics) {
+          setMetrics(prev => ({ ...prev, ...data.metrics }));
+        }
+      }
+    });
+
+    // If caregiver, auto-connect to RTM singleton as subscriber
     if (userRole === 'caregiver') {
-      startRTMOnly();
+      agoraRtm.initOrGet('subscriber')
+        .then(() => {
+          setMetrics(m => ({ ...m, connected: true }));
+        })
+        .catch((e) => console.error("RTM subscriber init error:", e));
     }
+
     return () => {
-      stopCall();
+      removeRtmListener();
       if (unsubscribeMemories) unsubscribeMemories();
     };
-  }, [userRole, userId]);
-
-  const getAgoraToken = async (uid: number, role: string) => {
-    const res = await fetch('/api/agora/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelName: CHANNEL_NAME, uid, role })
-    });
-    if (!res.ok) throw new Error('Failed to fetch token');
-    const data = await res.json();
-    return { rtcToken: data.rtcToken, rtmToken: data.rtmToken, uid: data.uid };
-  };
-
-  const startAgent = async () => {
-    const res = await fetch('/api/agora/start-agent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelName: CHANNEL_NAME })
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || err.message || err.error || 'Failed to start agent');
-    }
-  };
-
-  const stopAgent = async () => {
-    try {
-      await fetch('/api/agora/stop-agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelName: CHANNEL_NAME })
-      });
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  }, [userRole, userId, isDependent]);
 
   const cleanupMedia = async () => {
     if (localAudioTrack.current) {
@@ -100,58 +103,8 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
     }
   };
 
-  const cleanupRTM = async () => {
-    if (rtmClient.current) {
-      try {
-        await rtmClient.current.unsubscribe(CHANNEL_NAME);
-      } catch (e) {}
-      try {
-        await rtmClient.current.logout();
-      } catch (e) {}
-      rtmClient.current = null;
-    }
-  };
-
-  const startRTMOnly = async () => {
-    if (!APP_ID) return;
-    try {
-      await cleanupRTM();
-      const uid = Math.floor(Math.random() * 10000) + 1;
-      const { rtmToken, uid: rtmUid } = await getAgoraToken(uid, 'subscriber');
-
-      const client = new AgoraRTM.RTM(APP_ID, rtmUid);
-      rtmClient.current = client;
-      await client.login({ token: rtmToken });
-      await client.subscribe(CHANNEL_NAME);
-      
-      client.addEventListener('message', (event: any) => {
-        if (event.channelName === CHANNEL_NAME && event.messageType === 'STRING') {
-          try {
-            const data = JSON.parse(event.message);
-            if (data.type === 'transcript') {
-              setTranscript(prev => [...prev, data.message]);
-            } else if (data.type === 'state') {
-              setState(data.state);
-            } else if (data.type === 'metrics') {
-              setMetrics(prev => ({ ...prev, ...data.metrics }));
-            }
-          } catch (e) {}
-        }
-      });
-      setMetrics(m => ({ ...m, connected: true }));
-    } catch (e) {
-      console.error("RTM Error", e);
-    }
-  };
-
   const broadcastRTM = async (type: string, payload: any) => {
-    if (!rtmClient.current) return;
-    try {
-      const msg = JSON.stringify({ type, ...payload });
-      await rtmClient.current.publish(CHANNEL_NAME, msg);
-    } catch (e) {
-      console.error("Broadcast error", e);
-    }
+    await agoraRtm.publish(type, payload);
   };
 
   const startCall = async () => {
@@ -162,13 +115,13 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
 
     try {
       await cleanupMedia();
-      await cleanupRTM();
 
       setState('thinking');
+      telemetryService.startSession(CHANNEL_NAME, userId || undefined);
       
       rtcClient.current = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
 
-      // Enable volume indicator to drive the fluid orb
+      // Enable volume indicator to drive the fluid orb & VU meter
       rtcClient.current.enableAudioVolumeIndicator();
       rtcClient.current.on("volume-indicator", (volumes) => {
         let maxVol = 0;
@@ -176,31 +129,73 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
           if (v.level > maxVol) maxVol = v.level;
         });
         setVolume(maxVol);
+
+        // Detect user barge-in if dependent speaks during agent speech
+        if (maxVol > 45 && state === 'speaking') {
+          telemetryService.logEvent({ type: 'barge_in' });
+        }
       });
 
       rtcClient.current.on('user-published', async (user, mediaType) => {
-        await rtcClient.current?.subscribe(user, mediaType);
-        if (mediaType === 'audio') {
-          user.audioTrack?.play();
-          setState('speaking');
-          broadcastRTM('state', { state: 'speaking' });
+        console.log(`[Agora RTC] Remote user published: UID=${user.uid}, mediaType=${mediaType}`);
+        try {
+          await rtcClient.current?.subscribe(user, mediaType);
+          if (mediaType === 'audio') {
+            console.log(`[Agora RTC] Subscribed to remote audio track for UID=${user.uid}`);
+            if (user.audioTrack) {
+              user.audioTrack.setVolume(100);
+              try {
+                user.audioTrack.play();
+                console.log(`[Agora RTC] Audio track playback started for UID=${user.uid}`);
+              } catch (playErr) {
+                console.warn('[Agora RTC] Direct audio playback failed (browser autoplay policy), attempting unlock:', playErr);
+                // Retrying on next window user interaction
+                const unlock = () => {
+                  user.audioTrack?.play();
+                  window.removeEventListener('click', unlock);
+                  window.removeEventListener('touchstart', unlock);
+                };
+                window.addEventListener('click', unlock);
+                window.addEventListener('touchstart', unlock);
+              }
+            }
+            setState('speaking');
+            broadcastRTM('state', { state: 'speaking' });
+
+            // Calculate turn response latency (TTFA)
+            if (turnStartTimeRef.current > 0) {
+              const latency = Date.now() - turnStartTimeRef.current;
+              setMetrics(m => ({ ...m, latencyMs: latency }));
+              telemetryService.recordTurnMetric({
+                turnId: Date.now().toString(),
+                userId: userId || undefined,
+                channelName: CHANNEL_NAME,
+                vadDurationMs: 600,
+                turnLatencyMs: latency
+              });
+              turnStartTimeRef.current = 0;
+            }
+          }
+        } catch (subErr) {
+          console.error('[Agora RTC] Error subscribing to remote track:', subErr);
         }
       });
 
       rtcClient.current.on('user-unpublished', (user, mediaType) => {
+        console.log(`[Agora RTC] Remote user unpublished: UID=${user.uid}, mediaType=${mediaType}`);
         if (mediaType === 'audio') {
           user.audioTrack?.stop();
           setState('listening');
           broadcastRTM('state', { state: 'listening' });
+          turnStartTimeRef.current = Date.now();
         }
       });
 
       // Listen to Agent stream messages (transcript events)
-      rtcClient.current.on('stream-message', (uid, data) => {
+      rtcClient.current.on('stream-message', (_uid, data) => {
         try {
           const textMsg = new TextDecoder().decode(data);
           const parsed = JSON.parse(textMsg);
-          // If agent sends text:
           if (parsed.text) {
              const newMsg: TranscriptMessage = {
                id: Date.now().toString(),
@@ -210,34 +205,43 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
              };
              setTranscript(prev => [...prev, newMsg]);
              broadcastRTM('transcript', { message: newMsg });
+             agentService.submitTurnTranscript(CHANNEL_NAME, parsed.text, parsed.role || 'agent');
           }
         } catch (e) {}
       });
 
-      const uid = Math.floor(Math.random() * 10000) + 1;
-      const { rtcToken, rtmToken, uid: stringUid } = await getAgoraToken(uid, 'publisher');
-      
-      // Initialize RTM
-      const client = new AgoraRTM.RTM(APP_ID, stringUid);
-      rtmClient.current = client;
-      await client.login({ token: rtmToken });
-      await client.subscribe(CHANNEL_NAME);
+      // Initialize or reuse the RTM singleton client without tearing down connections
+      await agoraRtm.initOrGet('publisher');
 
-      await rtcClient.current.join(APP_ID, CHANNEL_NAME, rtcToken, uid);
+      // Setup RTC Audio Track & Join Channel
+      const rtcUid = 100000 + Math.floor(Math.random() * 90000) + 1;
+      const tokenData = await agentService.getTokens(CHANNEL_NAME, rtcUid, 'publisher');
+      const effectiveAppId = APP_ID || (tokenData as any).appId || 'd6289000c1bc4e0d9247e44a3b33c138';
+
+      await rtcClient.current.join(effectiveAppId, CHANNEL_NAME, tokenData.rtcToken, rtcUid);
       
-      localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack();
+      // Initialize microphone track with Acoustic Echo Cancellation, Noise Suppression, and AGC
+      localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack({
+        ANS: true,
+        AEC: true,
+        AGC: true
+      });
       await rtcClient.current.publish([localAudioTrack.current]);
       
       setMetrics(m => ({ ...m, connected: true }));
 
-      await startAgent();
+      const resolvedVoiceprint = voiceprintUrl || (userId ? localStorage.getItem(`mumai_voiceprint_${userId}`) : null);
+
+      await agentService.startAgent(CHANNEL_NAME, {
+        voiceprintUrl: resolvedVoiceprint || undefined
+      });
       
       setState('listening');
+      turnStartTimeRef.current = Date.now();
       await broadcastRTM('state', { state: 'listening' });
     } catch (error) {
       console.error("Error starting call:", error);
       await cleanupMedia();
-      await cleanupRTM();
       setState('error');
     }
   };
@@ -245,10 +249,10 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
   const stopCall = async () => {
     try {
       await cleanupMedia();
-      await cleanupRTM();
       
       if (isDependent) {
-        await stopAgent();
+        await agentService.stopAgent(CHANNEL_NAME);
+        await telemetryService.flushSessionSummary(userId || 'dependent', CHANNEL_NAME);
       }
 
       setMetrics(m => ({ ...m, connected: false }));

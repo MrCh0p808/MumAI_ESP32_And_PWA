@@ -1,0 +1,250 @@
+name: Skills Evaluation (Codex)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite_ids:
+        description: "Comma-separated suite IDs, or 'all' for all suites"
+        required: false
+        default: "workflow"
+      case_id:
+        description: "Single case ID (leave empty for full suite)"
+        required: false
+        default: "convoai-e2e-first-success"
+      model:
+        description: "Model for Codex"
+        required: false
+        default: ""
+      eval_ref:
+        description: "agentic-evals ref (branch/tag/SHA; default pinned in .github/eval-pin.env)"
+        required: false
+        default: ""
+
+  pull_request:
+    paths:
+      - "skills/**/*.md"
+      - ".github/workflows/**"
+
+env:
+  TARGET_ID: agora
+
+jobs:
+  evaluate:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout skills repo
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: skills-repo
+
+      - name: Setup eval harness
+        uses: ./skills-repo/.github/actions/setup-eval-harness
+        with:
+          eval_repo: AgoraIO/agentic-evals
+          eval_ref: ${{ github.event.inputs.eval_ref || '' }}
+
+      - name: Validate YAML
+        working-directory: agentic-evals
+        run: |
+          ruby -e '
+            require "yaml"
+            tid = "agora"
+            Dir["targets/#{tid}/cases/*/suite.yaml"].sort.each { |f| YAML.load_file(f) }
+            Dir["targets/#{tid}/cases/**/*.yaml"].sort.reject { |f| f.end_with?("suite.yaml") }.each { |f| YAML.load_file(f) }
+            YAML.load_file("targets/#{tid}/target.yaml")
+            puts "yaml-ok"
+          '
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime dependencies
+        run: |
+          pip install pyyaml
+          npm install -g --allow-scripts=agent-browser agent-browser @openai/codex
+          agent-browser install
+          agent-browser --version
+          codex --version
+
+      - name: Write credentials file
+        env:
+          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
+          AGORA_APP_CERTIFICATE: ${{ secrets.AGORA_APP_CERTIFICATE }}
+        run: |
+          cat > /tmp/agora-credentials.env << EOF
+          AGORA_APP_ID=${AGORA_APP_ID}
+          AGORA_APP_CERTIFICATE=${AGORA_APP_CERTIFICATE}
+          EOF
+          chmod 600 /tmp/agora-credentials.env
+
+      - name: Resolve cases
+        id: resolve
+        working-directory: agentic-evals
+        env:
+          SUITE_IDS: ${{ github.event.inputs.suite_ids || 'workflow' }}
+          CASE_ID: ${{ github.event.inputs.case_id || 'convoai-e2e-first-success' }}
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import yaml
+
+          target_id = os.environ["TARGET_ID"]
+          suite_ids = os.environ["SUITE_IDS"]
+          case_id = os.environ["CASE_ID"]
+          target = yaml.safe_load(open(f"targets/{target_id}/target.yaml"))
+          selected_suites = target["default_suites"] if suite_ids == "all" else [item.strip() for item in suite_ids.split(",")]
+          cases = []
+          for suite_id in selected_suites:
+              suite = yaml.safe_load(open(f"targets/{target_id}/cases/{suite_id}/suite.yaml"))
+              for case_path in suite["cases"]:
+                  case = yaml.safe_load(open(case_path))
+                  if case_id and case["case_id"] != case_id:
+                      continue
+                  cases.append({"case_id": case["case_id"], "path": case_path, "user_prompt": case["input"]["user_prompt"]})
+          if not cases:
+              raise SystemExit("No cases resolved.")
+          started = datetime.datetime.now(datetime.timezone.utc)
+          run_id = f"codex-{started.strftime('%Y%m%dT%H%M%SZ')}"
+          run_dir = f"runs/{run_id}"
+          os.makedirs(f"{run_dir}/case-artifacts", exist_ok=True)
+          os.makedirs(f"{run_dir}/case-results", exist_ok=True)
+          manifest = {
+              "run_mode": "single-run",
+              "run_id": run_id,
+              "runtime": "codex-cli-direct",
+              "target_id": target_id,
+              "suite_ids": selected_suites,
+              "case_ids": [case["case_id"] for case in cases],
+              "started_at": started.isoformat(),
+              "workspace_mode": "isolated-per-case",
+              "evidence_mode": "codex-direct-process",
+          }
+          json.dump(manifest, open(f"{run_dir}/manifest.json", "w"), indent=2)
+          json.dump(cases, open("/tmp/codex-eval-cases.json", "w"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"run_dir={run_dir}\n")
+          PY
+
+      - name: Run direct Codex case sessions
+        env:
+          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
+          AGORA_APP_CERTIFICATE: ${{ secrets.AGORA_APP_CERTIFICATE }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESPONSES_API_ENDPOINT: ${{ secrets.RESPONSES_API_ENDPOINT }}
+          MODEL: ${{ github.event.inputs.model || 'gpt-5.4' }}
+          RUN_DIR: ${{ steps.resolve.outputs.run_dir }}
+        working-directory: agentic-evals
+        run: |
+          set -e
+          mkdir -p "$HOME/.codex"
+          base_url="${RESPONSES_API_ENDPOINT%/responses}"
+          base_url="${base_url%/}/v1"
+          cat > "$HOME/.codex/config.toml" << EOF
+          model_provider = "OpenAI"
+          model = "${MODEL}"
+
+          [model_providers.OpenAI]
+          name = "OpenAI"
+          base_url = "${base_url}"
+          wire_api = "responses"
+          requires_openai_auth = true
+          EOF
+          if [ -n "$OPENAI_API_KEY" ]; then
+            cat > "$HOME/.codex/auth.json" << EOF
+          {"auth_mode":"apikey","OPENAI_API_KEY":"${OPENAI_API_KEY}"}
+          EOF
+          fi
+          codex --version
+          source /tmp/agora-credentials.env
+          python3 scripts/run_codex_eval.py
+
+      - name: Generate report
+        if: always() && steps.resolve.outputs.run_dir != ''
+        working-directory: agentic-evals
+        env:
+          RUN_DIR: ${{ steps.resolve.outputs.run_dir }}
+        run: python3 scripts/generate_report.py
+
+      - name: Locate run artifacts
+        id: artifacts
+        run: |
+          RUN_DIR="agentic-evals/${{ steps.resolve.outputs.run_dir }}"
+          echo "run_dir=${RUN_DIR}" >> "$GITHUB_OUTPUT"
+          echo "run_found=true" >> "$GITHUB_OUTPUT"
+          [ -f "${RUN_DIR}/report.md" ] \
+            && echo "report_exists=true" >> "$GITHUB_OUTPUT" \
+            || echo "report_exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Upload run artifacts
+        if: steps.artifacts.outputs.run_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-${{ env.TARGET_ID }}-${{ github.run_id }}
+          path: ${{ steps.artifacts.outputs.run_dir }}
+          retention-days: 30
+
+      - name: Post report to job summary
+        if: steps.artifacts.outputs.report_exists == 'true'
+        run: |
+          echo "## Skill Eval Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat "${{ steps.artifacts.outputs.run_dir }}/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post report as PR comment
+        if: >
+          github.event_name == 'pull_request' &&
+          steps.artifacts.outputs.report_exists == 'true'
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: ${{ steps.artifacts.outputs.run_dir }}/report.md
+          ARTIFACT_NAME: eval-run-${{ env.TARGET_ID }}-${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync(process.env.REPORT_PATH, 'utf8');
+            const artifactLink = `[📦 Download artifacts (screenshots included)](${process.env.RUN_URL})`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## Skill Eval Report\n\n${report}\n\n---\n${artifactLink}`,
+            });
+
+      - name: Report results
+        if: steps.artifacts.outputs.run_found == 'true'
+        run: |
+          RUN_DIR="${{ steps.artifacts.outputs.run_dir }}"
+          RESULTS_DIR="${RUN_DIR}/case-results"
+          [ -d "$RESULTS_DIR" ] || { echo "::warning::No case-results"; exit 0; }
+          FAIL=$(grep -rl '"status": "fail"' "$RESULTS_DIR" 2>/dev/null | wc -l || echo 0)
+          PASS=$(grep -rl '"status": "pass"' "$RESULTS_DIR" 2>/dev/null | wc -l || echo 0)
+          BLOCKED=$(grep -rl '"status": "blocked"' "$RESULTS_DIR" 2>/dev/null | wc -l || echo 0)
+          echo "Results: ${PASS} pass, ${FAIL} fail, ${BLOCKED} blocked"
+          if [ "$FAIL" -gt 0 ] || [ "$BLOCKED" -gt 0 ]; then
+            echo "::error::${FAIL} fail, ${BLOCKED} blocked - see report for details"
+            exit 1
+          fi
+
+      - name: Notify Feishu
+        if: always() && github.event_name != 'pull_request'
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          RUN_DIR: ${{ steps.artifacts.outputs.run_dir }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+        run: python3 agentic-evals/scripts/notify_feishu.py || true

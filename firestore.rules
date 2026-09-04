@@ -26,10 +26,12 @@ service cloud.firestore {
     }
 
     function isValidUser(data) {
-      return data.keys().hasAll(['role', 'name', 'email'])
-        && data.role is string && data.role in ['dependent', 'caregiver']
-        && data.name is string && data.name.size() <= 100
-        && data.email is string && data.email.size() <= 150;
+      return (!('role' in data) || (data.role is string && data.role in ['dependent', 'caregiver']))
+        && (!('name' in data) || (data.name is string && data.name.size() <= 100))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 150))
+        && (!('voiceprintUrl' in data) || (data.voiceprintUrl is string && data.voiceprintUrl.size() <= 500))
+        && (!('hasVoiceprint' in data) || data.hasVoiceprint is bool)
+        && (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
     match /users/{userId} {
@@ -37,7 +39,7 @@ service cloud.firestore {
       allow list: if isSignedIn();
       allow create: if isOwner(userId) && isValidUser(incoming());
       allow update: if isOwner(userId) && isValidUser(incoming()) 
-                     && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'email']);
+                     && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'email', 'voiceprintUrl', 'hasVoiceprint', 'createdAt']);
     }
 
     function isValidMemory(data) {
@@ -54,6 +56,25 @@ service cloud.firestore {
                      && exists(/databases/$(database)/documents/users/$(incoming().dependentId));
       allow update: if false; // Logs are immutable
       allow delete: if false;
+    }
+
+    function isValidTelemetry(data) {
+      return (!('userId' in data) || (data.userId is string && data.userId.size() <= 128))
+        && (!('channelName' in data) || (data.channelName is string && data.channelName.size() <= 128))
+        && (!('turnsCount' in data) || data.turnsCount is number)
+        && (!('avgLatencyMs' in data) || data.avgLatencyMs is number)
+        && (!('maxLatencyMs' in data) || data.maxLatencyMs is number)
+        && (!('bargeInCount' in data) || data.bargeInCount is number)
+        && (!('voiceprintMatchPct' in data) || data.voiceprintMatchPct is number)
+        && (!('startedAt' in data) || data.startedAt is number)
+        && (!('endedAt' in data) || data.endedAt is number)
+        && (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    match /telemetry/{telemetryId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidTelemetry(incoming());
+      allow update, delete: if false; // Telemetry metrics are immutable
     }
   }
 }

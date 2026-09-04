@@ -1,0 +1,10 @@
+{
+  "default": true,
+  "MD013": false,
+  "MD024": {
+    "siblings_only": true
+  },
+  "MD033": false,
+  "MD060": false,
+  "comment": "MD013 (line-length): disabled because URLs, API paths, and tables cannot always wrap safely. MD024 allows repeated changelog section names under different releases. MD033 allows diagram markup. MD060 preserves the repository's established table style."
+}

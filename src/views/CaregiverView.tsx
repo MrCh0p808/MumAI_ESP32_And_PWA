@@ -1,5 +1,8 @@
+import { Suspense, lazy } from 'react';
 import { Activity, ShieldAlert, Wifi, Pill } from 'lucide-react';
 import { useMumAI } from '../hooks/useMumAI';
+
+const CaregiverStats = lazy(() => import('../components/CaregiverStats'));
 
 export function CaregiverView({ userId }: { userId: string }) {
   const { metrics, transcript, memories } = useMumAI('caregiver', userId);
@@ -8,7 +11,7 @@ export function CaregiverView({ userId }: { userId: string }) {
     <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-4xl mx-auto w-full pt-16">
       <header className="mb-8">
         <h2 className="text-2xl font-bold text-slate-100">Caregiver Dashboard</h2>
-        <p className="text-slate-400">Monitoring Dependent's Status</p>
+        <p className="text-slate-400">Monitoring Dependent's Status & Interaction Health</p>
       </header>
 
       {/* Top Metrics Row */}
@@ -40,6 +43,15 @@ export function CaregiverView({ userId }: { userId: string }) {
           <p className="text-xl font-bold text-slate-100">{metrics.latencyMs} ms</p>
         </div>
       </div>
+
+      {/* Interaction Health Trends & Latency Analytics */}
+      <Suspense fallback={
+        <div className="h-64 rounded-2xl bg-slate-800/50 border border-slate-700/50 animate-pulse flex items-center justify-center text-slate-500 text-sm">
+          Loading Conversational Health Metrics...
+        </div>
+      }>
+        <CaregiverStats />
+      </Suspense>
 
       <div className="grid md:grid-cols-2 gap-6">
         {/* Live Transcript */}
