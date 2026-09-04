@@ -12,7 +12,8 @@ let activeAgentId: string | null = null;
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Use Render's dynamically assigned PORT in production, fallback to 3000 for local dev
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   // Ensure public voiceprints directory exists
   const voiceprintsDir = path.join(process.cwd(), 'public', 'voiceprints');
