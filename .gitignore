@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+config.h
+*/config.h
+firmware/**/config.h

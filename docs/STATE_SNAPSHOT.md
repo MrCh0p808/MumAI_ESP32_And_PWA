@@ -15,6 +15,7 @@
 - [x] Phase 5 (Step 3): Bi-Directional Cloud WebSocket Node Firmware generated (`firmware/Maa_Conversational_Node/Maa_Conversational_Node.ino`)
 - [x] Cloud Gateway: Bi-directional WebSocket server at `/api/audio/stream` mounted on Express backend (`server.ts`).
 - [x] Web & Cloud RTC Fix: Resolved Agora TaskConflict handling in `server.ts`, RTM instance isolation/cleanup in `useMumAI.ts`, and full API type safety.
+- [x] Agora Skills Knowledge Base: Official Agora Skills reference suite (v1.8.2) integrated into `docs/agora-skills/` covering ConvoAI v2, RTC, RTM, and Gateway protocols.
 
 ### Active Blockers / Physical Grounding Checks
 - Breadboard contact resistance: Ensure header pins on INMP441 and MAX98357A are soldered.
@@ -27,6 +28,6 @@
   3. "WebSockets" by Markus Sattler (v2.4.0+)
 
 ### Immediate Next Target
-- User configures WiFi SSID/Pass in `Maa_Conversational_Node.ino`.
+- User configures private WiFi credentials in `firmware/Maa_Conversational_Node/config.h`.
 - Flash sketch to ESP32-S3 and observe connection to Mum AI Cloud Gateway.
-- Verify bi-directional audio flow with zero acoustic feedback screech.
+- Verify bi-directional audio flow with zero acoustic feedback screech and secrets protected via `.gitignore`.

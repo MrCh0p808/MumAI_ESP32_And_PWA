@@ -65,20 +65,13 @@
 #include <math.h>
 
 // --------------------------------------------------------------------------------------
-// 1. CONFIGURATION (Set your WiFi & Gateway Endpoint)
+// 1. HARDWARE CONFIGURATION (Air-Gapped Private Credentials)
 // --------------------------------------------------------------------------------------
-// Replace with your local WiFi credentials
-const char* DEFAULT_WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* DEFAULT_WIFI_PASS     = "YOUR_WIFI_PASSWORD";
-
-// Cloud Gateway Host (Use your deployed Render domain or local development IP)
-// Examples:
-// - Cloud: "mum-ai.onrender.com" (Port 443 with WSS)
-// - Local: "192.168.1.50" (Port 3000 with WS)
-const char* GATEWAY_HOST          = "mum-ai.onrender.com";
-const int   GATEWAY_PORT          = 443;
-const char* GATEWAY_PATH          = "/api/audio/stream";
-const bool  GATEWAY_USE_SSL       = (GATEWAY_PORT == 443);
+#if __has_include("config.h")
+  #include "config.h"
+#else
+  #include "config.example.h"
+#endif
 
 // --------------------------------------------------------------------------------------
 // 2. PIN DEFINITIONS (Octal PSRAM Safe Zones)
@@ -100,15 +93,6 @@ const bool  GATEWAY_USE_SSL       = (GATEWAY_PORT == 443);
 #define I2S_SPK_DIN     18
 
 #define BUTTON_BOOT_PIN 0
-
-// --------------------------------------------------------------------------------------
-// 3. AUDIO & DSP CONSTANTS
-// --------------------------------------------------------------------------------------
-#define AUDIO_SAMPLE_RATE     16000   // 16 kHz Standard for Agora & Gemini
-#define FRAME_SAMPLES         256     // 16ms frames
-#define MIC_BIT_SHIFT         14      // +12dB analog gain emulation
-#define MIC_DC_FILTER_ALPHA   0.05f   // Single-pole high-pass DC bias remover
-#define MIC_SOFT_CLIP_THRESH  32000   // Prevent 16-bit clipping
 
 // --------------------------------------------------------------------------------------
 // 4. GLOBAL OBJECTS & STATE
@@ -462,11 +446,11 @@ void setup() {
     pinMode(BUTTON_BOOT_PIN, INPUT_PULLUP);
 
     // Initialize WiFi
-    Serial.printf("[WIFI] Connecting to '%s'...\n", DEFAULT_WIFI_SSID);
-    updateDisplayCard("WIFI", DEFAULT_WIFI_SSID, ST77XX_YELLOW);
+    Serial.printf("[WIFI] Connecting to '%s'...\n", WIFI_SSID);
+    updateDisplayCard("WIFI", WIFI_SSID, ST77XX_YELLOW);
     
     WiFi.mode(WIFI_STA);
-    WiFi.begin(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASS);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 35) {
