@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import crypto from 'crypto';
+import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import pkg from 'agora-token';
 const { RtcTokenBuilder, RtcRole, RtmTokenBuilder } = pkg;
@@ -364,8 +365,81 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // Attach WebSocket Gateway for ESP32 and Web Audio Streaming & Telemetry
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url || '', `http://${request.headers.host}`);
+      if (url.pathname === '/api/audio/stream' || url.pathname === '/api/agora/convo-ai') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      } else {
+        // Let other upgrade requests (e.g. Vite HMR in dev) pass or close
+        if (process.env.NODE_ENV === "production") {
+          socket.destroy();
+        }
+      }
+    } catch (e) {
+      socket.destroy();
+    }
+  });
+
+  const wsClients = new Set<WebSocket>();
+
+  wss.on('connection', (ws: WebSocket) => {
+    wsClients.add(ws);
+    console.log(`[WS] Hardware / Web client connected. Total clients: ${wsClients.size}`);
+
+    ws.send(JSON.stringify({
+      type: 'connected',
+      message: 'Mum AI Cloud Gateway Active',
+      sample_rate: 16000,
+      channels: 1,
+      format: 'PCM_16BIT'
+    }));
+
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        // Broadcast raw 16-bit PCM audio frames to other connected clients
+        for (const client of wsClients) {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(data, { binary: true });
+          }
+        }
+      } else {
+        try {
+          const text = data.toString();
+          const msg = JSON.parse(text);
+
+          if (msg.type === 'ping') {
+            ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+          } else if (msg.type === 'state') {
+            for (const client of wsClients) {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type: 'state', state: msg.state }));
+              }
+            }
+          }
+        } catch (e) {
+          // non-JSON message
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      wsClients.delete(ws);
+      console.log(`[WS] Client disconnected. Active: ${wsClients.size}`);
+    });
+
+    ws.on('error', (err) => {
+      console.error('[WS] Socket error:', err);
+    });
   });
 }
 
