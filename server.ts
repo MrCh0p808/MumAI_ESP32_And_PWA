@@ -101,7 +101,15 @@ async function startServer() {
       const currentTimestamp = Math.floor(Date.now() / 1000);
       const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
       // We generate an RTC token for the agent to join the channel
-      const token = RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, channelName, agentUid, RtcRole.PUBLISHER, privilegeExpiredTs);
+      const token = RtcTokenBuilder.buildTokenWithUid(
+        appId,
+        appCertificate,
+        channelName,
+        agentUid,
+        RtcRole.PUBLISHER,
+        privilegeExpiredTs,
+        privilegeExpiredTs
+      );
       
       const dynamicName = patientName || "Beta";
       const hour = new Date().getHours();
@@ -187,13 +195,20 @@ async function startServer() {
       const data = await response.json();
       
       if (!response.ok) {
+        // If an agent session is already running in this channel or has a task conflict,
+        // it is already active and ready to converse with the user!
+        if (data.reason === 'TaskConflict' && data.agent_id) {
+          console.log(`[Agora] Agent is already active in channel ${channelName} (${data.agent_id}). Joining existing session.`);
+          activeAgentId = data.agent_id;
+          return res.json({ agent_id: data.agent_id, status: 'RUNNING', alreadyRunning: true });
+        }
         console.error('Agora Agent Join Error:', data);
         return res.status(response.status).json(data);
       }
 
       // Store agentId so we can stop it later
-      if (data.agentId) {
-        activeAgentId = data.agentId;
+      if (data.agent_id || data.agentId) {
+        activeAgentId = data.agent_id || data.agentId;
       }
 
       res.json(data);
@@ -219,13 +234,33 @@ async function startServer() {
         return res.status(400).json({ error: 'channelName is required' });
       }
       
-      const agentId = activeAgentId;
+      const authHeader = 'Basic ' + Buffer.from(`${customerId}:${customerSecret}`).toString('base64');
+      let agentId = activeAgentId;
+
+      // If activeAgentId is null, query Agora for running agents
+      if (!agentId) {
+        try {
+          const listRes = await fetch(`https://api.agora.io/api/conversational-ai-agent/v2/projects/${appId}/agents`, {
+            headers: { 'Authorization': authHeader }
+          });
+          if (listRes.ok) {
+            const listData = await listRes.json();
+            if (listData?.data?.list?.length > 0) {
+              const runningAgent = listData.data.list.find((a: any) => a.status === 'RUNNING');
+              if (runningAgent) {
+                agentId = runningAgent.agent_id;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Could not query active agents:', err);
+        }
+      }
+
       if (!agentId) {
          console.log("No active agent ID found to stop");
          return res.json({ success: true });
       }
-
-      const authHeader = 'Basic ' + Buffer.from(`${customerId}:${customerSecret}`).toString('base64');
       
       // To stop, we call POST /v2/projects/{appid}/agents/{agentId}/leave
       const response = await fetch(`https://api.agora.io/api/conversational-ai-agent/v2/projects/${appId}/agents/${agentId}/leave`, {

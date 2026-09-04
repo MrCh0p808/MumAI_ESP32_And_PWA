@@ -66,7 +66,10 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channelName: CHANNEL_NAME })
     });
-    if (!res.ok) throw new Error('Failed to start agent');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.message || err.error || 'Failed to start agent');
+    }
   };
 
   const stopAgent = async () => {
@@ -81,18 +84,47 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
     }
   };
 
+  const cleanupMedia = async () => {
+    if (localAudioTrack.current) {
+      try {
+        localAudioTrack.current.stop();
+        localAudioTrack.current.close();
+      } catch (e) {}
+      localAudioTrack.current = null;
+    }
+    if (rtcClient.current) {
+      try {
+        await rtcClient.current.leave();
+      } catch (e) {}
+      rtcClient.current = null;
+    }
+  };
+
+  const cleanupRTM = async () => {
+    if (rtmClient.current) {
+      try {
+        await rtmClient.current.unsubscribe(CHANNEL_NAME);
+      } catch (e) {}
+      try {
+        await rtmClient.current.logout();
+      } catch (e) {}
+      rtmClient.current = null;
+    }
+  };
+
   const startRTMOnly = async () => {
     if (!APP_ID) return;
     try {
+      await cleanupRTM();
       const uid = Math.floor(Math.random() * 10000) + 1;
-      const { rtcToken, rtmToken, uid: rtmUid } = await getAgoraToken(uid, 'subscriber');
+      const { rtmToken, uid: rtmUid } = await getAgoraToken(uid, 'subscriber');
 
-      rtmClient.current = new AgoraRTM.RTM(APP_ID, rtmUid);
-      await rtmClient.current.login({ token: rtmToken });
+      const client = new AgoraRTM.RTM(APP_ID, rtmUid);
+      rtmClient.current = client;
+      await client.login({ token: rtmToken });
+      await client.subscribe(CHANNEL_NAME);
       
-      await rtmClient.current.subscribe(CHANNEL_NAME);
-      
-      rtmClient.current.addEventListener('message', (event: any) => {
+      client.addEventListener('message', (event: any) => {
         if (event.channelName === CHANNEL_NAME && event.messageType === 'STRING') {
           try {
             const data = JSON.parse(event.message);
@@ -129,8 +161,10 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
     }
 
     try {
+      await cleanupMedia();
+      await cleanupRTM();
+
       setState('thinking');
-      await broadcastRTM('state', { state: 'thinking' });
       
       rtcClient.current = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
 
@@ -156,6 +190,8 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
       rtcClient.current.on('user-unpublished', (user, mediaType) => {
         if (mediaType === 'audio') {
           user.audioTrack?.stop();
+          setState('listening');
+          broadcastRTM('state', { state: 'listening' });
         }
       });
 
@@ -182,9 +218,10 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
       const { rtcToken, rtmToken, uid: stringUid } = await getAgoraToken(uid, 'publisher');
       
       // Initialize RTM
-      rtmClient.current = new AgoraRTM.RTM(APP_ID, stringUid);
-      await rtmClient.current.login({ token: rtmToken });
-      await rtmClient.current.subscribe(CHANNEL_NAME);
+      const client = new AgoraRTM.RTM(APP_ID, stringUid);
+      rtmClient.current = client;
+      await client.login({ token: rtmToken });
+      await client.subscribe(CHANNEL_NAME);
 
       await rtcClient.current.join(APP_ID, CHANNEL_NAME, rtcToken, uid);
       
@@ -199,32 +236,16 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
       await broadcastRTM('state', { state: 'listening' });
     } catch (error) {
       console.error("Error starting call:", error);
+      await cleanupMedia();
+      await cleanupRTM();
       setState('error');
     }
   };
 
   const stopCall = async () => {
     try {
-      if (localAudioTrack.current) {
-        localAudioTrack.current.stop();
-        localAudioTrack.current.close();
-        localAudioTrack.current = null;
-      }
-      
-      if (rtcClient.current) {
-        await rtcClient.current.leave();
-        rtcClient.current = null;
-      }
-
-      if (rtmClient.current) {
-        try {
-          await rtmClient.current.unsubscribe(CHANNEL_NAME);
-        } catch(e) {}
-      }
-      if (rtmClient.current) {
-        await rtmClient.current.logout();
-        rtmClient.current = null;
-      }
+      await cleanupMedia();
+      await cleanupRTM();
       
       if (isDependent) {
         await stopAgent();
@@ -239,7 +260,7 @@ export function useMumAI(userRole: UserRole = 'dependent', userId: string | null
   };
 
   const toggleListening = useCallback(() => {
-    if (state === 'idle') {
+    if (state === 'idle' || state === 'error') {
       startCall();
     } else {
       stopCall();
