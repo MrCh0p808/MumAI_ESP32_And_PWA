@@ -28,6 +28,8 @@
 - [x] Module 3.11: Anchored ConvoAI ASR to Deepgram Nova-3, upgraded TTS to Sarvam Bulbul V3 with instant greeting and automatic ElevenLabs resilient fallback
 - [x] Module 3.12: Hardened ConvoAI join handler with automated stale session eviction on `TaskConflict`, eliminating zombie agent channel hijacking
 - [x] Module 3.13: Resolved audio silence bug — corrected Sarvam Bulbul V3 speaker from invalid `meera` to validated maternal voice `roopa`, added WebRTC volume enforcement and browser autoplay unlocking
+- [x] Module 3.14: Hardened Agora RTM service with stable session UID caching, promise deduplication, reconnect loop rate limiting, and graceful RTC fallback to eliminate socket connection storm errors
+- [x] Module 3.15: Successfully migrated to fresh `MumAI-Prod` Agora project (`60d7bf2696644ccc84bab67e42b82bd9`) with air-gapped RESTful API credentials; verified end-to-end token generation, ConvoAI cloud agent spawn (`RUNNING` status), and graceful stop lifecycle
 
 ### Active Blockers / Hardware Grounding Notes
 - Microphones: Browser user-gesture permission modal safely unlocks AudioContext and requests mic before joining.

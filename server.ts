@@ -5,7 +5,8 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import pkg from 'agora-token';
 const { RtcTokenBuilder, RtcRole, RtmTokenBuilder } = pkg;
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 
 // Module-level state to track the active agent ID
 let activeAgentId: string | null = null;
@@ -93,7 +94,7 @@ async function startServer() {
   app.post('/api/agora/token', (req, res) => {
     try {
       const { channelName, uid, role } = req.body;
-      const appId = process.env.AGORA_APP_ID || 'd6289000c1bc4e0d9247e44a3b33c138';
+      const appId = process.env.AGORA_APP_ID;
       const appCertificate = process.env.AGORA_APP_CERTIFICATE;
 
       if (!appId || !appCertificate) {
@@ -139,7 +140,7 @@ async function startServer() {
   app.post('/api/agora/start-agent', async (req, res) => {
     try {
       const { channelName, patientName, pipelineId, asrResourceId, llmResourceId, ttsResourceId, voiceprintUrl, ttsEngine } = req.body;
-      const appId = process.env.AGORA_APP_ID || 'd6289000c1bc4e0d9247e44a3b33c138';
+      const appId = process.env.AGORA_APP_ID;
       const appCertificate = process.env.AGORA_APP_CERTIFICATE;
       const customerId = process.env.AGORA_CUSTOMER_ID;
       const customerSecret = process.env.AGORA_CUSTOMER_SECRET;
@@ -166,10 +167,10 @@ async function startServer() {
 
       const authHeader = 'Basic ' + Buffer.from(`${customerId}:${customerSecret}`).toString('base64');
 
-      const targetPipelineId = pipelineId || process.env.AGORA_PIPELINE_ID || 'b4cf52826990410f90c86ba864e604e7';
-      const targetAsrResourceId = asrResourceId || process.env.AGORA_ASR_RESOURCE_ID || '67cf85d8-764e-42a1-b43e-36780806c744';
-      const targetLlmResourceId = llmResourceId || process.env.AGORA_LLM_RESOURCE_ID || 'b48a37a7-336c-48ae-94a2-ca3992b45e99';
-      const targetTtsResourceId = ttsResourceId || process.env.AGORA_TTS_RESOURCE_ID || '4fd89f26-0e42-45e0-b6c8-f94d9354924a';
+      const targetPipelineId = pipelineId || process.env.AGORA_PIPELINE_ID;
+      const targetAsrResourceId = asrResourceId || process.env.AGORA_ASR_RESOURCE_ID;
+      const targetLlmResourceId = llmResourceId || process.env.AGORA_LLM_RESOURCE_ID;
+      const targetTtsResourceId = ttsResourceId || process.env.AGORA_TTS_RESOURCE_ID;
 
       // TTS Configuration: Sarvam Bulbul V3 ('roopa' / Hindi) vs Console ElevenLabs
       const sarvamKey = process.env.SARVAM_API_KEY;
@@ -187,32 +188,17 @@ async function startServer() {
         }
       } : {
         vendor: "elevenlabs",
-        model: "eleven_multilingual_v2",
         params: {
-          speed: 1,
-          style: 0,
           model_id: "eleven_multilingual_v2",
           voice_id: "pNInz6obpgDQGcFmaJgB",
-          stability: 0.5,
-          resource_id: targetTtsResourceId,
-          sample_rate: 24000,
-          speaker_boost: true,
-          similarity_boost: 0.75
+          ...(targetTtsResourceId ? { resource_id: targetTtsResourceId } : {})
         }
       };
 
-      const systemPromptContent = "You are 'Maa' companion. You are an empathetic, supportive, protective, witty, and homely Indian mother persona providing proactive care. Keep your answers concise, warm, and natural. Speak in conversational Hinglish and Hindi.";
+      const systemPromptContent = "You are 'Maa' companion, an affectionate, empathetic, caring, and witty Indian mother. Always speak in natural, warm conversational Hinglish (blend of Hindi and English) with short, natural spoken sentences. Respond promptly and show loving maternal concern.";
 
       // SAL Voiceprint Configuration
       const targetVoiceprintUrl = voiceprintUrl || process.env.AGORA_VOICEPRINT_SAMPLE_URL;
-      const salConfig: any = targetVoiceprintUrl ? {
-        sal_mode: "recognition",
-        sample_urls: {
-          "primary_user": targetVoiceprintUrl
-        }
-      } : {
-        sal_mode: "locking"
-      };
 
       // Base properties aligned with Agora ConvoAI End-to-End Specification
       const properties: any = {
@@ -224,41 +210,39 @@ async function startServer() {
         advanced_features: {
           enable_aivad: true,
           enable_rtm: true,
-          enable_sal: true
+          ...(targetVoiceprintUrl ? { enable_sal: true } : {})
         },
         parameters: {
           data_channel: "rtm",
           enable_metrics: true,
           enable_error_message: true
         },
-        sal: salConfig,
         turn_detection: {
           mode: "server_vad",
           server_vad_config: {
             threshold: 0.5,
-            prefix_padding_ms: 600,
+            prefix_padding_ms: 300,
             silence_duration_ms: 500
           }
         },
         interruption: {
           enable: true,
-          timeout_ms: 150
+          timeout_ms: 200
         },
         asr: {
           vendor: "deepgram",
-          language: "multi", // Deepgram Nova-3 multilingual code-switching (Hindi, English, Hinglish)
+          language: "multi", // Deepgram multilingual code-switching (Hindi, English, Hinglish)
           params: {
-            resource_id: targetAsrResourceId,
-            model: "nova-3",
-            language: "multi"
-          },
-          model: "nova-3"
+            model: "nova-2",
+            ...(targetAsrResourceId ? { resource_id: targetAsrResourceId } : {})
+          }
         },
         llm: {
-          vendor: "gemini",
+          vendor: "openai",
           params: {
-            model: "gemini-2.5-pro",
-            temperature: 0.4
+            model: "gpt-4o-mini",
+            temperature: 0.6,
+            ...(targetLlmResourceId ? { resource_id: targetLlmResourceId } : {})
           },
           system_messages: [
             {
@@ -267,20 +251,23 @@ async function startServer() {
             }
           ],
           greeting_message: "Haan beta, bolo! Main sun rahi hoon.",
-          failure_message: "Arre beta, ek baar phir se bolo na, theek se sunai nahi diya.",
-          model: "gemini-2.5-pro",
-          resource_id: targetLlmResourceId,
-          temperature: 0.4
+          failure_message: "Arre beta, ek baar phir se bolo na, theek se sunai nahi diya."
         },
-        tts: ttsConfig,
-        mllm: {
-          enable: false
-        }
+        tts: ttsConfig
       };
+
+      if (targetVoiceprintUrl) {
+        properties.sal = {
+          sal_mode: "recognition",
+          sample_urls: {
+            "primary_user": targetVoiceprintUrl
+          }
+        };
+      }
 
       const payload: any = {
         name: channelName,
-        pipeline_id: targetPipelineId,
+        ...(targetPipelineId ? { pipeline_id: targetPipelineId } : {}),
         properties
       };
 
@@ -380,7 +367,7 @@ async function startServer() {
   app.post('/api/agora/stop-agent', async (req, res) => {
     try {
       const { channelName } = req.body;
-      const appId = process.env.AGORA_APP_ID || 'd6289000c1bc4e0d9247e44a3b33c138';
+      const appId = process.env.AGORA_APP_ID;
       const customerId = process.env.AGORA_CUSTOMER_ID;
       const customerSecret = process.env.AGORA_CUSTOMER_SECRET;
 

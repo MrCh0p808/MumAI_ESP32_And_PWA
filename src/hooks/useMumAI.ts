@@ -24,6 +24,7 @@ export function useMumAI(
   });
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
+  const [micPermissionError, setMicPermissionError] = useState<boolean>(false);
 
   const rtcClient = useRef<IAgoraRTCClient | null>(null);
   const localAudioTrack = useRef<IMicrophoneAudioTrack | null>(null);
@@ -210,22 +211,33 @@ export function useMumAI(
         } catch (e) {}
       });
 
-      // Initialize or reuse the RTM singleton client without tearing down connections
+      // 1. Initialize microphone track first with Acoustic Echo Cancellation, Noise Suppression, and AGC
+      try {
+        localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack({
+          ANS: true,
+          AEC: true,
+          AGC: true
+        });
+      } catch (micErr: any) {
+        console.warn("Microphone access denied or unavailable in browser:", micErr);
+        setMicPermissionError(true);
+        setState('error');
+        return;
+      }
+
+      // 2. Initialize or reuse the RTM singleton client
       await agoraRtm.initOrGet('publisher');
 
-      // Setup RTC Audio Track & Join Channel
+      // 3. Setup RTC Audio Track & Join Channel
       const rtcUid = 100000 + Math.floor(Math.random() * 90000) + 1;
       const tokenData = await agentService.getTokens(CHANNEL_NAME, rtcUid, 'publisher');
-      const effectiveAppId = APP_ID || (tokenData as any).appId || 'd6289000c1bc4e0d9247e44a3b33c138';
+      const effectiveAppId = (tokenData as any).appId || APP_ID;
+
+      if (!effectiveAppId) {
+        throw new Error("Agora App ID is not configured");
+      }
 
       await rtcClient.current.join(effectiveAppId, CHANNEL_NAME, tokenData.rtcToken, rtcUid);
-      
-      // Initialize microphone track with Acoustic Echo Cancellation, Noise Suppression, and AGC
-      localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack({
-        ANS: true,
-        AEC: true,
-        AGC: true
-      });
       await rtcClient.current.publish([localAudioTrack.current]);
       
       setMetrics(m => ({ ...m, connected: true }));
@@ -239,8 +251,11 @@ export function useMumAI(
       setState('listening');
       turnStartTimeRef.current = Date.now();
       await broadcastRTM('state', { state: 'listening' });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error starting call:", error);
+      if (error?.code === 'PERMISSION_DENIED' || error?.name === 'NotAllowedError') {
+        setMicPermissionError(true);
+      }
       await cleanupMedia();
       setState('error');
     }
@@ -284,6 +299,8 @@ export function useMumAI(
     metrics,
     transcript,
     memories,
+    micPermissionError,
+    clearMicPermissionError: () => setMicPermissionError(false),
     toggleListening,
     triggerSOS
   };

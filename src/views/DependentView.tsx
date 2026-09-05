@@ -12,7 +12,7 @@ export function DependentView({ userId }: { userId: string }) {
   const [isVoiceprintModalOpen, setIsVoiceprintModalOpen] = useState(false);
   const [checkedVoiceprint, setCheckedVoiceprint] = useState(false);
 
-  const { state, volume, toggleListening, triggerSOS } = useMumAI('dependent', userId, voiceprintUrl);
+  const { state, volume, toggleListening, triggerSOS, micPermissionError, clearMicPermissionError } = useMumAI('dependent', userId, voiceprintUrl);
   const [permissionRequested, setPermissionRequested] = useState(false);
   const [sosConfirmed, setSosConfirmed] = useState(false);
 
@@ -174,6 +174,54 @@ export function DependentView({ userId }: { userId: string }) {
       <div className="w-full flex-1 flex items-center justify-center z-10">
         <FluidOrb state={state} volume={volume} />
       </div>
+
+      {/* Microphone Permission Blocked Interactive Guide */}
+      <AnimatePresence>
+        {micPermissionError && (
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 15 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 15 }}
+            className="w-full max-w-md mx-auto mb-6 p-5 rounded-2xl bg-rose-950/90 border border-rose-500/50 backdrop-blur-xl shadow-2xl z-30"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/20 text-rose-400 mt-0.5 shrink-0">
+                <AlertTriangle size={22} />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-rose-100 flex items-center gap-2">
+                  Microphone Access Blocked
+                </h3>
+                <p className="text-xs text-rose-200 mt-1.5 leading-relaxed">
+                  Your browser blocked access to the microphone. To talk with Maa:
+                </p>
+                <ol className="text-xs text-rose-300 mt-2 space-y-1 list-decimal list-inside bg-rose-900/30 p-2.5 rounded-xl border border-rose-500/20">
+                  <li>Click the <strong>🔒 Lock / 🎛️ Settings</strong> icon in your browser address bar.</li>
+                  <li>Toggle <strong>Microphone</strong> to <strong>Allow</strong>.</li>
+                  <li>Click <strong>Retry Connection</strong> below.</li>
+                </ol>
+                <div className="mt-4 flex items-center gap-2.5">
+                  <button
+                    onClick={() => {
+                      clearMicPermissionError();
+                      toggleListening();
+                    }}
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 text-white text-xs font-semibold shadow-lg shadow-rose-500/25 transition-all flex items-center justify-center gap-2"
+                  >
+                    <Mic size={16} /> Retry Connection
+                  </button>
+                  <button
+                    onClick={clearMicPermissionError}
+                    className="px-3.5 py-2.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-medium hover:text-white transition-colors"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Pre-Interaction Microphone Permission & Voiceprint Modal / Card */}
       <AnimatePresence>
